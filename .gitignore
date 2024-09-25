@@ -5,6 +5,8 @@
 !ansible/
 !tests/
 
+ansible/control-web/ansible-venv/
+
 # Do not ignore shell script files (.sh)
 !*.sh
 
