@@ -1,0 +1,17 @@
+- name: Manage maintenance plugin on staging server
+  hosts: staging
+  become: yes
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Deactivate maintenance plugin
+      ansible.builtin.shell:
+        cmd: "wp plugin deactivate maintenance --allow-root"
+        chdir: "{{ wp_path }}/tellermitte"
+      become: yes
+
+    - name: Activate maintenance plugin
+      ansible.builtin.shell:
+        cmd: "wp plugin activate maintenance --allow-root"
+        chdir: "{{ wp_path }}/tellermitte"
+      become: yes

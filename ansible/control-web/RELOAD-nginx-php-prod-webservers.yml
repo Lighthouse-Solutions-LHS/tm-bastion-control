@@ -1,0 +1,43 @@
+---
+- name: Retrieve all production web servers from AWS and reload services
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - amazon.aws
+  tasks:
+    - name: Gather info about all EC2 instances with the tag type=prod_web
+      ec2_instance_info:
+        region: eu-central-1
+        filters:
+          "tag:type": "prod_web"
+      register: ec2_instances
+
+    - name: Print the Private IPs (for debugging purposes)
+      debug:
+        msg: "{{ item.private_ip_address | default('No private IP available') }}"
+      loop: "{{ ec2_instances.instances }}"
+      when: "'state' in item and item.state.name == 'running'"
+
+    - name: Add all target webservers to the host group
+      add_host:
+        hostname: "{{ item.private_ip_address }}"
+        groups: prod_web_webservers
+      loop: "{{ ec2_instances.instances }}"
+      when:
+        - item.private_ip_address is defined and item.private_ip_address | length > 0
+        - "'state' in item and item.state.name == 'running'"
+
+- name: Reload NGINX and php-fpm on all prod web servers
+  hosts: prod_web_webservers
+  gather_facts: false
+  become: yes
+  tasks:
+    - name: Reload NGINX
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded
+
+    - name: Reload php-fpm
+      ansible.builtin.systemd:
+        name: php-fpm
+        state: reloaded

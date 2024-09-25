@@ -1,0 +1,15 @@
+# vars.yml
+prod_db_host: "tm-aws-db-restored-cluster.cluster-cytlgqqecfqj.eu-central-1.rds.amazonaws.com"
+prod_db_user: "wordpress"
+prod_db_password: "wordpress"
+prod_db_name: "wordpress"
+staging_db_user: "wordpress"
+staging_db_password: "m4l00tschen"
+staging_db_name: "wordpress"
+staging_db_host: "localhost"
+prod_server_path: "/var/lib/nginx/wordpress"
+staging_server_path: "/var/lib/nginx/staging"
+wp_path: "/var/www/wordpress"
+original_domain: "https://tellermitte.de"
+staging_domain: "https://staging.tellermitte.de"
+wp_cli_available: true  # Set to false if wp-cli is not installed on the staging server

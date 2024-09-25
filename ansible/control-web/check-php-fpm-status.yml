@@ -1,0 +1,60 @@
+---
+- name: Retrieve all production web servers from AWS and check PHP-FPM status
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - amazon.aws
+  tasks:
+    - name: Gather info about all EC2 instances with the tag type=prod_web
+      ec2_instance_info:
+        region: eu-central-1
+        filters:
+          "tag:type": "prod_web"
+      register: ec2_instances
+
+    - name: Print the Private IPs (for debugging purposes)
+      debug:
+        msg: "{{ item.private_ip_address | default('No private IP available') }}"
+      loop: "{{ ec2_instances.instances }}"
+      when: "'state' in item and item.state.name == 'running'"
+
+    - name: Add all target webservers to the host group
+      add_host:
+        hostname: "{{ item.private_ip_address }}"
+        groups: prod_web_webservers
+      loop: "{{ ec2_instances.instances }}"
+      when:
+        - item.private_ip_address is defined and item.private_ip_address | length > 0
+        - "'state' in item and item.state.name == 'running'"
+
+- name: Check PHP-FPM status on all prod web servers
+  hosts: prod_web_webservers
+  gather_facts: false
+  become: yes
+  tasks:
+    - name: Check PHP-FPM process status
+      ansible.builtin.shell: ps -ef | grep php-fpm | grep -v grep
+      register: php_fpm_processes
+
+    - name: Output PHP-FPM process status
+      ansible.builtin.debug:
+        msg: |
+          Server: {{ inventory_hostname }}
+          PHP-FPM Processes:
+          {% for line in php_fpm_processes.stdout_lines %}
+            - {{ line }}
+          {% endfor %}
+
+    - name: Check PHP-FPM pool status
+      ansible.builtin.shell: cat /var/log/php-fpm/www-error.log | tail -n 10
+      register: php_fpm_pool_status
+
+    - name: Output PHP-FPM pool status
+      ansible.builtin.debug:
+        msg: |
+          Server: {{ inventory_hostname }}
+          PHP-FPM Pool Status (last 10 log entries):
+          {% for line in php_fpm_pool_status.stdout_lines %}
+            - {{ line }}
+          {% endfor %}
+

@@ -1,0 +1,32 @@
+---
+- name: Retrieve all production web servers from AWS and update hosts.ini
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Gather info about all EC2 instances with the tag type=prod_web
+      ec2_instance_info:
+        region: eu-central-1
+        filters:
+          "tag:type": "prod_web"
+      register: ec2_instances
+
+    - name: Find the first running instance with a private IP address
+      set_fact:
+        prod_instance: "{{ ec2_instances.instances | selectattr('state.name', 'equalto', 'running') | selectattr('private_ip_address', 'defined') | first }}"
+      when: ec2_instances.instances | selectattr('state.name', 'equalto', 'running') | selectattr('private_ip_address', 'defined') | list | length > 0
+
+    - name: Fail if no running instance with a private IP address is found
+      fail:
+        msg: "No running instances with a private IP address found."
+      when: prod_instance is not defined
+
+    - name: Print the selected Private IP (for visibility in output)
+      debug:
+        msg: "Selected prod_server IP: {{ prod_instance.private_ip_address }}"
+
+    - name: Update the prod_server IP in the production group in hosts.ini
+      lineinfile:
+        path: /home/ec2-user/ansible/migrate-wordpress-for-staging/hosts.ini
+        regexp: '^prod_server ansible_host='
+        line: "prod_server ansible_host={{ prod_instance.private_ip_address }} ansible_user=ec2-user"
+

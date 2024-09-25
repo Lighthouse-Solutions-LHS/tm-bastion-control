@@ -1,0 +1,119 @@
+---
+- name: Retrieve all production web servers from AWS and check PHP-FPM status and system metrics
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - amazon.aws
+  tasks:
+    - name: Gather info about all EC2 instances with the tag type=prod_web
+      amazon.aws.ec2_instance_info:
+        region: eu-central-1  # specify your AWS region
+        filters:
+          "tag:type": "prod_web"
+      register: ec2_instances
+
+    - name: Add all target webservers to the host group
+      add_host:
+        hostname: "{{ item.private_ip_address }}"
+        groups: prod_web_webservers
+      loop: "{{ ec2_instances.instances }}"
+      when:
+        - item.private_ip_address is defined and item.private_ip_address | length > 0
+        - "'state' in item and item.state.name == 'running'"
+
+- name: Check PHP-FPM status and system metrics on all prod web servers
+  hosts: prod_web_webservers
+  gather_facts: false
+  become: yes
+  tasks:
+    - name: Retrieve PHP-FPM status via /fpm-status
+      ansible.builtin.shell: curl -s http://127.0.0.1/fpm-status
+      register: php_fpm_status
+
+    - name: Split PHP-FPM status lines
+      set_fact:
+        php_fpm_status_lines: "{{ php_fpm_status.stdout.splitlines() }}"
+
+    - name: Filter lines with colon
+      set_fact:
+        php_fpm_status_colon_lines: "{{ php_fpm_status_lines | select('search', ':') | list }}"
+
+    - name: Create key-value pairs from colon lines
+      set_fact:
+        php_fpm_key_value_pairs: >-
+          {{
+            php_fpm_status_colon_lines
+            | map('regex_replace', '^\\s*([^:]+):\\s*(.+)$', '\\1: \\2')
+            | map('split', ': ', 1)
+            | map('list')
+          }}
+
+    - name: Parse PHP-FPM status
+      set_fact:
+        fpm_status_parsed: "{{ dict(php_fpm_key_value_pairs | map('list')) }}"
+
+    - name: Gather load average
+      ansible.builtin.command: uptime
+      register: load_avg
+
+    - name: Gather CPU usage
+      ansible.builtin.shell: >
+        top -bn1 | grep "Cpu(s)" |
+        sed "s/.*, *\([0-9.]*\)%* id.*/\1/" |
+        awk '{print 100 - $1"%"}'
+      register: cpu_usage
+
+    - name: Gather iowait
+      ansible.builtin.shell: >
+        top -bn1 | grep "Cpu(s)" |
+        awk -F ',' '{for (i=1; i<=NF; i++) if ($i ~ /wa/) print $i}' |
+        awk '{print $1}'
+      register: io_wait
+
+    - name: Gather memory usage
+      ansible.builtin.shell: >
+        free -m | awk 'NR==2{printf "Memory Usage: %s/%sMB (%.2f%%)\n", $3-$6,$2,($3-$6)*100/$2 }'
+      register: mem_usage
+
+    - name: Gather disk I/O statistics
+      ansible.builtin.command: iostat -dx
+      register: io_stat
+
+    - name: Gather network statistics
+      ansible.builtin.shell: cat /proc/net/dev
+      register: net_stat
+
+    - name: Gather top processes by CPU and memory usage
+      ansible.builtin.shell: ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%mem | head -n 5
+      register: top_processes
+
+    - name: Output PHP-FPM status and system metrics
+      ansible.builtin.debug:
+        msg: |
+          Server: {{ inventory_hostname }}
+
+          PHP-FPM Status:
+            Pool: {{ fpm_status_parsed.pool | default('N/A') }}
+            Process Manager: {{ fpm_status_parsed['process manager'] | default('N/A') }}
+            Accepted Connections: {{ fpm_status_parsed['accepted conn'] | default('N/A') }}
+            Active Processes: {{ fpm_status_parsed['active processes'] | default('N/A') }}
+            Total Processes: {{ fpm_status_parsed['total processes'] | default('N/A') }}
+            Max Active Processes: {{ fpm_status_parsed['max active processes'] | default('N/A') }}
+            Max Children Reached: {{ fpm_status_parsed['max children reached'] | default('N/A') }}
+            Slow Requests: {{ fpm_status_parsed['slow requests'] | default('N/A') }}
+
+          System Metrics:
+            Load Average: {{ load_avg.stdout.split('load average: ')[1] | default('N/A') }}
+            CPU Usage: {{ cpu_usage.stdout | default('N/A') }}
+            IO Wait: {{ io_wait.stdout | default('N/A') }}
+            {{ mem_usage.stdout | default('N/A') }}
+
+            Disk I/O Statistics:
+              {{ io_stat.stdout | default('N/A') }}
+
+            Network Statistics:
+              {{ net_stat.stdout | default('N/A') }}
+
+            Top Processes:
+              {{ top_processes.stdout | default('N/A') }}
+

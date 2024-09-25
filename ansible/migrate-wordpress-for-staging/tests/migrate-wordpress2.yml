@@ -1,0 +1,94 @@
+- name: Install prerequisites on servers
+  hosts: all
+  become: yes
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Install MySQL client on production servers
+      ansible.builtin.yum:
+        name: mysql
+        state: present
+      when: inventory_hostname in groups['production']
+
+    - name: Install MariaDB client on staging servers
+      ansible.builtin.yum:
+        name: mariadb
+        state: present
+      when: inventory_hostname in groups['staging']
+
+    - name: Ensure rsync is available on all servers for file synchronization
+      ansible.builtin.yum:
+        name: rsync
+        state: present
+
+    - name: Install WP-CLI on staging server if not already available
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+        dest: /usr/local/bin/wp
+        mode: '0755'
+      when: inventory_hostname in groups['staging'] and wp_cli_available
+
+- name: Clean and synchronize WordPress files to staging server
+  hosts: localhost
+  become: yes
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Remove existing files in staging directory to ensure a clean state
+      ansible.builtin.shell:
+        cmd: rm -rf {{ staging_server_path }}/*
+        executable: /bin/bash
+      become: yes
+
+    - name: Rsync WordPress files to staging, excluding cache and backups
+      ansible.builtin.shell:
+        cmd: rsync -avh --delete --exclude 'wp-content/cache/wp-rocket/' --exclude 'wp-content/backups/' -z {{ prod_server_path }}/ {{ staging_server_path }}/
+        executable: /bin/bash
+
+- name: Optimize and import database on staging server
+  hosts: staging
+  become: yes
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Start MariaDB service to ensure it's running
+      ansible.builtin.service:
+        name: mariadb
+        state: started
+
+    - name: Drop existing staging database and create a new one
+      ansible.builtin.shell:
+        cmd: mysql -u {{ staging_db_user }} -p'{{ staging_db_password }}' -e "DROP DATABASE IF EXISTS {{ staging_db_name }}; CREATE DATABASE {{ staging_db_name }} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+    
+    - name: Disable MySQL checks before import for faster processing
+      ansible.builtin.shell:
+        cmd: mysql -u {{ staging_db_user }} -p'{{ staging_db_password }}' {{ staging_db_name }} -e "SET autocommit=0; SET unique_checks=0; SET foreign_key_checks=0;"
+    
+    - name: Import WordPress database from SQL dump
+      ansible.builtin.shell:
+        cmd: mysql -u {{ staging_db_user }} -p'{{ staging_db_password }}' {{ staging_db_name }} < {{ wp_path }}/wordpress_db.sql
+
+    - name: Re-enable MySQL checks after import and commit transactions
+      ansible.builtin.shell:
+        cmd: mysql -u {{ staging_db_user }} -p'{{ staging_db_password }}' {{ staging_db_name }} -e "SET autocommit=1; SET unique_checks=1; SET foreign_key_checks=1; COMMIT;"
+
+    - name: Update site URLs in WordPress database on staging
+      ansible.builtin.shell:
+        cmd: wp search-replace '{{ original_domain }}' '{{ staging_domain }}' --path={{ wp_path }} --skip-columns=guid
+        args:
+          chdir: "{{ wp_path }}"
+        when: wp_cli_available
+
+    - name: Set correct file permissions for WordPress installation on staging
+      ansible.builtin.shell:
+        cmd: chown nginx.nginx -R {{ wp_path }}
+      become: yes
+
+    - name: Reload PHP-FPM and Nginx to apply changes
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: reloaded
+        loop:
+          - php-fpm
+          - nginx
+

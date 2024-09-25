@@ -1,0 +1,161 @@
+---
+- name: Install prerequisites on servers
+  hosts: all
+  become: yes
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Install MySQL client on production servers
+      ansible.builtin.yum:
+        name: mysql
+        state: present
+      when: inventory_hostname in groups['production']
+
+    - name: Ensure MariaDB client is installed on staging servers
+      ansible.builtin.yum:
+        name: mariadb
+        state: present
+      when: inventory_hostname in groups['staging']
+
+    - name: Ensure rsync is available for file synchronization
+      ansible.builtin.yum:
+        name: rsync
+        state: present
+
+    - name: Install WP-CLI on staging server if not present
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+        dest: /usr/local/bin/wp
+        mode: '0755'
+      when: inventory_hostname in groups['staging'] and wp_cli_available
+
+- name: Generate and transfer WordPress database dump excluding specific tables
+  hosts: production
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Get list of tables to exclude (containing 'log' or 'cleverreach')
+      ansible.builtin.shell: >
+        mysql --skip-ssl -u {{ prod_db_user }} -p'{{ prod_db_password }}' -h {{ prod_db_host }} -D {{ prod_db_name }} -e "SHOW TABLES LIKE '%log%'; SHOW TABLES LIKE '%cleverreach%';" | grep -v Tables_in | awk '{print $1}' > /tmp/exclude_tables.txt
+      delegate_to: localhost
+      become: yes
+
+    - name: Read exclude tables list
+      ansible.builtin.shell: cat /tmp/exclude_tables.txt
+      delegate_to: localhost
+      register: exclude_tables_list
+
+    - name: Create mysqldump command with exclusions
+      ansible.builtin.copy:
+        dest: "/tmp/dump_command.sh"
+        content: |
+          #!/bin/bash
+          mysqldump --skip-ssl -h {{ prod_db_host }} -u {{ prod_db_user }} -p'{{ prod_db_password }}' {{ prod_db_name }} \
+          {% for table in exclude_tables_list.stdout_lines %}
+          --ignore-table={{ prod_db_name }}.{{ table }} \
+          {% endfor %}
+          > {{ prod_server_path }}/wordpress_db.sql
+        mode: '0755'
+      delegate_to: localhost
+
+    - name: Display the final mysqldump command
+      ansible.builtin.shell: cat /tmp/dump_command.sh
+      delegate_to: localhost
+      register: final_dump_command
+
+    - name: Output the final mysqldump command
+      ansible.builtin.debug:
+        msg: "{{ final_dump_command.stdout }}"
+
+    - name: Execute mysqldump command script
+      ansible.builtin.command: bash /tmp/dump_command.sh
+      delegate_to: localhost
+
+- name: Prepare and transfer WordPress files and database dump to staging
+  hosts: localhost
+  become: yes
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Ensure a clean staging directory before sync
+      ansible.builtin.shell:
+        cmd: "rm -rf {{ staging_server_path }}/*"
+        executable: /bin/bash
+
+    - name: Rsync WordPress files to staging with optimized rsync
+      ansible.builtin.shell:
+        cmd: "rsync -avh --delete --exclude='wp-content/uploads/wp-staging' --exclude='wp-content/object-cache.php' --exclude 'wp-content/cache/wp-rocket/' --exclude 'wp-content/backups/' {{ prod_server_path }}/ {{ staging_server_path }}/"
+        executable: /bin/bash
+
+- name: Optimize and import database on staging server
+  hosts: staging
+  become: yes
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Ensure MariaDB service is up
+      ansible.builtin.service:
+        name: mariadb
+        state: started
+
+    - name: Prepare staging database for import
+      ansible.builtin.shell:
+        cmd: "mysql --skip-ssl -u {{ staging_db_user }} -p'{{ staging_db_password }}' -e 'DROP DATABASE IF EXISTS {{ staging_db_name }}; CREATE DATABASE {{ staging_db_name }} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;'"
+
+    - name: Optimize and import WordPress database in one step
+      ansible.builtin.shell:
+        cmd: |
+          mysql --skip-ssl -u {{ staging_db_user }} -p'{{ staging_db_password }}' {{ staging_db_name }} -e "
+          SET autocommit=0; SET unique_checks=0; SET foreign_key_checks=0;
+          SOURCE {{ wp_path }}/wordpress_db.sql;
+          SET autocommit=1; SET unique_checks=1; SET foreign_key_checks=1; COMMIT;"
+      become: yes
+
+    - name: Generate STAGING Wordpress wp-config.php from template
+      ansible.builtin.template:
+        src: wp-config.php.j2
+        dest: "{{ wp_path }}/tellermitte/wp-config.php"
+      become: yes
+
+    - name: Generate STAGING NGINX tellermitte.de.conf from template
+      ansible.builtin.template:
+        src: nginx-tellermitte.conf.j2
+        dest: "/etc/nginx/conf.d/tellermitte.de.conf"
+      become: yes
+      tags:
+        - generate_staging_nginx_conf
+
+    - name: Update WordPress URLs on staging with wp search-replace
+      ansible.builtin.shell:
+        cmd: "wp search-replace '{{ original_domain }}' '{{ staging_domain }}' --path={{ wp_path }}/tellermitte --skip-columns=guid --allow-root"
+        chdir: "{{ wp_path }}"
+      when: wp_cli_available
+      become: yes
+
+    - name: Deactivate maintenance plugin
+      ansible.builtin.shell:
+        cmd: "wp plugin deactivate maintenance --allow-root"
+        chdir: "{{ wp_path }}/tellermitte"
+      become: yes
+
+    - name: Activate maintenance plugin
+      ansible.builtin.shell:
+        cmd: "wp plugin activate maintenance --allow-root"
+        chdir: "{{ wp_path }}/tellermitte"
+      become: yes
+
+    - name: Set correct file permissions for WordPress installation on staging
+      ansible.builtin.shell:
+        cmd: "chown -R nginx:nginx {{ wp_path }}"
+      become: yes
+
+    - name: Reload PHP-FPM and Nginx to apply new configuration
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: reloaded
+      loop:
+        - php-fpm
+        - nginx
+      tags:
+        - reload_nginx_php
+
