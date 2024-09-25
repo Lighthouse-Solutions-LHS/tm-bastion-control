@@ -1,0 +1,13 @@
+# Ignore everything
+*
+
+# Do not ignore these directories
+!ansible/
+!tests/
+
+# Do not ignore shell script files (.sh)
+!*.sh
+
+# Ensure .gitignore itself is not ignored
+!.gitignore
+
