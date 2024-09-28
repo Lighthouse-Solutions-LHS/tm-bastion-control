@@ -13,3 +13,4 @@ ansible/control-web/ansible-venv/
 # Ensure .gitignore itself is not ignored
 !.gitignore
 
+*.log
